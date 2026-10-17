@@ -58,14 +58,16 @@ python rotate_screen.py --list                       :: 列出所有显示器及
 1. 通过 `EnumDisplayDevicesW` 枚举所有连接到桌面的显示器；
 2. 读取当前显示模式（`EnumDisplaySettingsW`），按目标方向交换宽高；
 3. 枚举驱动支持的全部显示模式，挑选宽高互换、色深相同的候选（刷新率优先匹配）；
-4. 依次尝试应用：`CDS_TEST` 预验证 + `CDS_UPDATEREGISTRY` 持久化 → `flags=0` 动态生效（可精确指定显示器）→ 旧 API `ChangeDisplaySettingsW` 回退；
+4. 按优先级应用，**优先保证写入注册表 / CCD 数据库（重启后仍生效）**：CCD API（`QueryDisplayConfig` 读取拓扑，修改目标路径 `rotation`，`SetDisplayConfig` 带 `SDC_SAVE_TO_DATABASE`）——系统"设置"应用同款机制，动态生效与持久化一步完成，优先使用；`ChangeDisplaySettingsExW + CDS_UPDATEREGISTRY` 写注册表；旧 API `ChangeDisplaySettingsW + CDS_UPDATEREGISTRY`（实测部分驱动对 Ex API 恒返回 `BADPARAM`，但旧 API 仍能写入注册表）；以上全部失败才退到 `flags=0` 仅动态生效，并如实提示"重启/注销后会恢复默认方向"；
 5. 应用后对比所有屏幕的前后状态，确认变化确实发生在所选屏幕上，否则明确告警。
+
+> 旧版"重启失效"的根因：动态生效（`flags=0`）先一步成功，导致后面的注册表持久化路径永远走不到；且个别驱动对 `CDS_TEST` 一律返回 `BADPARAM`，把"TEST 通过才写注册表"的逻辑整个堵死。现已改为持久化优先 + CCD API。
 
 ## 已知限制 / 故障排查
 
 - **部分显卡驱动不支持旋转**：切换失败并提示"模式不受支持"时，请在 NVIDIA 控制面板 → 显示 → 旋转显示器 中确认允许旋转。
-- **本机实测旋转会被系统自动恢复**（约几十秒到几分钟，疑似驱动/系统层面重置动态显示模式，程序无法阻止）；换机器通常正常。若发生，屏幕会自己弹回原方向，重新切换即可。
-- **非主显示器只能临时旋转**：某些驱动对副屏只接受动态模式（见上一条）。
+- **提示"仅动态生效" = 未持久化**：说明本机所有持久化路径均被驱动拒绝，重启后会恢复默认方向；正常情况下提示应为"已持久化，重启后仍生效"。
+- **个别机器系统会自动重置显示模式**：短时间内把动态旋转弹回注册表状态，持久化成功后不受此影响。
 - **双击 bat 提示找不到 python**：需安装 Python 并加入 PATH（安装时勾选 "Add Python to PATH"）。
 - **编辑器类型告警**：`pyrightconfig.json` 已屏蔽 ctypes 脚本固有的类型注解告警，不影响运行。
 

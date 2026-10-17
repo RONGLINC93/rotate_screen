@@ -19,6 +19,7 @@ from ctypes import wintypes
 
 # ---------------- 常量 ----------------
 ENUM_CURRENT_SETTINGS = -1
+ENUM_REGISTRY_SETTINGS = -2  # 注册表中保存的配置（重启后生效的那一份）
 CDS_UPDATEREGISTRY = 0x00000001
 
 DM_DISPLAYORIENTATION = 0x00000080
@@ -121,6 +122,132 @@ class DISPLAY_DEVICEW(ctypes.Structure):
     ]
 
 
+# ---------------- CCD（Connecting and Configuring Displays）持久化旋转 ----------------
+# Windows 7+ 提供，系统"设置"应用更换屏幕旋转时使用的正是这套机制：
+#   QueryDisplayConfig 读取当前拓扑 -> 修改目标路径的 rotation ->
+#   SetDisplayConfig(SDC_APPLY|SDC_USE_SUPPLIED_DISPLAY_CONFIG|SDC_SAVE_TO_DATABASE)
+# 一步同时完成"当前会话生效"和"写入 CCD 数据库（重启后仍生效）"。
+# 实测部分显卡驱动（如 GTX 1080 + 部分 NVIDIA 驱动）上
+# ChangeDisplaySettingsExW + CDS_UPDATEREGISTRY 恒返回 BADPARAM/BADMODE（副屏尤其
+# 明显），导致旋转只能动态生效、重启即丢；CCD 路径不受该问题影响，故作为第一优先。
+# DMDO(0/1/2/3) 与 DISPLAYCONFIG_ROTATION(1/2/3/4) 数值上相差 1。
+
+QDC_ONLY_ACTIVE_PATHS = 0x00000002
+SDC_USE_SUPPLIED_DISPLAY_CONFIG = 0x00000020
+SDC_APPLY = 0x00000080
+SDC_SAVE_TO_DATABASE = 0x00000200
+
+DISPLAYCONFIG_ROTATION_IDENTITY = 1   # 0°
+DISPLAYCONFIG_ROTATION_ROTATE90 = 2   # 顺时针 90°
+DISPLAYCONFIG_ROTATION_ROTATE180 = 3  # 180°
+DISPLAYCONFIG_ROTATION_ROTATE270 = 4  # 顺时针 270°
+
+DMDO_TO_DC_ROTATION = {
+    DMDO_DEFAULT: DISPLAYCONFIG_ROTATION_IDENTITY,
+    DMDO_90: DISPLAYCONFIG_ROTATION_ROTATE90,
+    DMDO_180: DISPLAYCONFIG_ROTATION_ROTATE180,
+    DMDO_270: DISPLAYCONFIG_ROTATION_ROTATE270,
+}
+
+DC_DEVICE_INFO_GET_SOURCE_NAME = 1
+
+
+class LUID(ctypes.Structure):
+    _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+
+class RECTL(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+class DISPLAYCONFIG_RATIONAL(ctypes.Structure):
+    _fields_ = [("Numerator", wintypes.UINT), ("Denominator", wintypes.UINT)]
+
+
+class DISPLAYCONFIG_2DREGION(ctypes.Structure):
+    _fields_ = [("cx", wintypes.UINT), ("cy", wintypes.UINT)]
+
+
+class DISPLAYCONFIG_VIDEO_SIGNAL_INFO(ctypes.Structure):
+    _fields_ = [
+        ("pixelRate", ctypes.c_uint64),
+        ("hSyncFreq", DISPLAYCONFIG_RATIONAL),
+        ("vSyncFreq", DISPLAYCONFIG_RATIONAL),
+        ("activeSize", DISPLAYCONFIG_2DREGION),
+        ("totalSize", DISPLAYCONFIG_2DREGION),
+        ("videoStandard", wintypes.UINT),
+        ("scanLineOrdering", wintypes.UINT),
+    ]
+
+
+class DISPLAYCONFIG_MODE_UNION(ctypes.Union):
+    # 只需保证字节数不小于真实结构体，内容原样回传给 SetDisplayConfig，
+    # 因此除 targetVideoSignalInfo(48 字节) 外用字节数组占位即可
+    _fields_ = [
+        ("targetVideoSignalInfo", DISPLAYCONFIG_VIDEO_SIGNAL_INFO),
+        ("sourceMode", ctypes.c_ubyte * 24),
+        ("desktopImageInfo", ctypes.c_ubyte * 40),
+    ]
+
+
+class DISPLAYCONFIG_MODE_INFO(ctypes.Structure):
+    _fields_ = [
+        ("infoType", wintypes.UINT),
+        ("id", wintypes.UINT),
+        ("adapterId", LUID),
+        ("mode", DISPLAYCONFIG_MODE_UNION),
+    ]
+
+
+class DISPLAYCONFIG_PATH_SOURCE_INFO(ctypes.Structure):
+    _fields_ = [
+        ("adapterId", LUID),
+        ("id", wintypes.UINT),
+        ("modeInfoIdx", wintypes.UINT),
+        ("statusFlags", wintypes.UINT),
+    ]
+
+
+class DISPLAYCONFIG_PATH_TARGET_INFO(ctypes.Structure):
+    _fields_ = [
+        ("adapterId", LUID),
+        ("id", wintypes.UINT),
+        ("modeInfoIdx", wintypes.UINT),
+        ("outputTechnology", wintypes.UINT),
+        ("rotation", wintypes.UINT),
+        ("scaling", wintypes.UINT),
+        ("refreshRate", DISPLAYCONFIG_RATIONAL),
+        ("scanLineOrdering", wintypes.UINT),
+        ("targetAvailable", wintypes.BOOL),
+        ("statusFlags", wintypes.UINT),
+    ]
+
+
+class DISPLAYCONFIG_PATH_INFO(ctypes.Structure):
+    _fields_ = [
+        ("sourceInfo", DISPLAYCONFIG_PATH_SOURCE_INFO),
+        ("targetInfo", DISPLAYCONFIG_PATH_TARGET_INFO),
+        ("flags", wintypes.UINT),
+    ]
+
+
+class DISPLAYCONFIG_DEVICE_INFO_HEADER(ctypes.Structure):
+    _fields_ = [
+        ("type", wintypes.UINT),
+        ("size", wintypes.UINT),
+        ("adapterId", LUID),
+        ("id", wintypes.UINT),
+    ]
+
+
+class DISPLAYCONFIG_SOURCE_DEVICE_NAME(ctypes.Structure):
+    _fields_ = [
+        ("header", DISPLAYCONFIG_DEVICE_INFO_HEADER),
+        ("viewGdiDeviceName", ctypes.c_wchar * 32),
+    ]
+
+
 user32 = ctypes.windll.user32
 
 # 显式声明参数类型（关键：不声明时 ctypes 不校验参数个数，多传参数会导致 BADPARAM）
@@ -130,23 +257,119 @@ user32.ChangeDisplaySettingsExW.restype = wintypes.LONG
 user32.ChangeDisplaySettingsW.argtypes = [ctypes.POINTER(DEVMODEW), wintypes.DWORD]
 user32.ChangeDisplaySettingsW.restype = wintypes.LONG
 
+# CCD API（Windows 7+；个别精简系统可能缺失，缺失时自动走下面的回退路径）
+if hasattr(user32, "GetDisplayConfigBufferSizes"):
+    user32.GetDisplayConfigBufferSizes.argtypes = [
+        wintypes.UINT, ctypes.POINTER(wintypes.UINT), ctypes.POINTER(wintypes.UINT)]
+    user32.GetDisplayConfigBufferSizes.restype = wintypes.LONG
+    user32.QueryDisplayConfig.argtypes = [
+        wintypes.UINT, ctypes.POINTER(wintypes.UINT),
+        ctypes.POINTER(DISPLAYCONFIG_PATH_INFO), ctypes.POINTER(wintypes.UINT),
+        ctypes.POINTER(DISPLAYCONFIG_MODE_INFO), ctypes.c_void_p]
+    user32.QueryDisplayConfig.restype = wintypes.LONG
+    user32.SetDisplayConfig.argtypes = [
+        wintypes.UINT, ctypes.POINTER(DISPLAYCONFIG_PATH_INFO),
+        wintypes.UINT, ctypes.POINTER(DISPLAYCONFIG_MODE_INFO), wintypes.UINT]
+    user32.SetDisplayConfig.restype = wintypes.LONG
+    user32.DisplayConfigGetDeviceInfo.argtypes = [
+        ctypes.POINTER(DISPLAYCONFIG_SOURCE_DEVICE_NAME)]
+    user32.DisplayConfigGetDeviceInfo.restype = wintypes.LONG
 
-def apply_mode(device_name, dm):
+
+def rotate_via_ccd(device_name, new_orientation):
+    """通过 CCD API 旋转指定显示器，并写入 CCD 数据库（重启后仍生效）。
+
+    返回 True 仅表示 API 调用成功，调用方仍需用 verify_rotation 校验实际效果。
     """
-    按优先级尝试三种应用方式，返回 (返回码, 说明)：
-      1) CDS_TEST 预验证 + CDS_UPDATEREGISTRY 持久化（规范路径，多数机器可用）
-      2) flags=0 动态生效（部分驱动拒绝上面的 flags 但允许 0，且能精确指定显示器）
-      3) ChangeDisplaySettingsW 旧 API（作用于当前主显示器，可能不是所选屏幕）
+    if not hasattr(user32, "QueryDisplayConfig"):
+        return False
+    npaths = wintypes.UINT(0)
+    nmodes = wintypes.UINT(0)
+    if user32.GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS,
+                                          ctypes.byref(npaths),
+                                          ctypes.byref(nmodes)) != 0:
+        return False
+    paths = (DISPLAYCONFIG_PATH_INFO * npaths.value)()
+    modes = (DISPLAYCONFIG_MODE_INFO * nmodes.value)()
+    if user32.QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, ctypes.byref(npaths), paths,
+                                 ctypes.byref(nmodes), modes, None) != 0:
+        return False
+    # 用 GDI 设备名（\\.\DISPLAY1 等）在活动路径中定位目标显示器
+    target = None
+    for i in range(npaths.value):
+        sdn = DISPLAYCONFIG_SOURCE_DEVICE_NAME()
+        sdn.header.type = DC_DEVICE_INFO_GET_SOURCE_NAME
+        sdn.header.size = ctypes.sizeof(DISPLAYCONFIG_SOURCE_DEVICE_NAME)
+        sdn.header.adapterId = paths[i].sourceInfo.adapterId
+        sdn.header.id = paths[i].sourceInfo.id
+        if (user32.DisplayConfigGetDeviceInfo(ctypes.byref(sdn)) == 0
+                and sdn.viewGdiDeviceName == device_name):
+            target = i
+            break
+    if target is None:
+        return False
+    rotation = DMDO_TO_DC_ROTATION.get(new_orientation, 0)
+    if rotation == 0:
+        return False
+    paths[target].targetInfo.rotation = rotation
+    return user32.SetDisplayConfig(npaths.value, paths, nmodes.value, modes,
+                                   SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG
+                                   | SDC_SAVE_TO_DATABASE) == 0
+
+
+def try_persist(device_name, dm):
+    """尝试把显示模式写入注册表（重启后仍生效）。返回 (返回码, 说明)，失败时说明为 None。
+
+    依次尝试：
+      1) ChangeDisplaySettingsExW + CDS_UPDATEREGISTRY（规范路径）
+      2) ChangeDisplaySettingsW + CDS_UPDATEREGISTRY（旧 API；实测部分驱动对
+         Ex API 恒返回 BADPARAM/BADMODE，但旧 API 仍能正常写入注册表）
+    注意不再先用 CDS_TEST 预验证：有驱动对 TEST 标志一律返回 BADPARAM，
+    会把本来可用的持久化路径全部堵死，因此直接尝试、失败即换下一种方式。
     """
-    if user32.ChangeDisplaySettingsExW(device_name, ctypes.byref(dm), CDS_TEST, None) == DISP_CHANGE_SUCCESSFUL:
-        r = user32.ChangeDisplaySettingsExW(device_name, ctypes.byref(dm), CDS_UPDATEREGISTRY, None)
-        if r == DISP_CHANGE_SUCCESSFUL:
-            return r, "已写入注册表"
+    dm.dmDeviceName = device_name
+    r = user32.ChangeDisplaySettingsExW(device_name, ctypes.byref(dm),
+                                        CDS_UPDATEREGISTRY, None)
+    if r in (DISP_CHANGE_SUCCESSFUL, DISP_CHANGE_RESTART):
+        return r, "已写入注册表" + ("（重启后生效）" if r == DISP_CHANGE_RESTART else "")
+    r = user32.ChangeDisplaySettingsW(ctypes.byref(dm), CDS_UPDATEREGISTRY)
+    if r in (DISP_CHANGE_SUCCESSFUL, DISP_CHANGE_RESTART):
+        return r, "已通过旧 API 写入注册表" + (
+            "（重启后生效）" if r == DISP_CHANGE_RESTART else "")
+    return r, None
+
+
+def try_dynamic(device_name, dm):
+    """仅让模式在当前会话动态生效（重启/注销后恢复默认），作为最后手段。
+
+    返回 (返回码, 说明)，失败时说明为 None。
+    """
+    dm.dmDeviceName = device_name
     r = user32.ChangeDisplaySettingsExW(device_name, ctypes.byref(dm), 0, None)
     if r == DISP_CHANGE_SUCCESSFUL:
-        return r, "动态生效（注销/重启后恢复默认）"
-    r = user32.ChangeDisplaySettingsW(ctypes.byref(dm), CDS_UPDATEREGISTRY)
-    return r, "已回退到旧 API（可能作用于主显示器而非所选屏幕）"
+        return r, "仅动态生效，重启/注销后会恢复默认方向"
+    r = user32.ChangeDisplaySettingsW(ctypes.byref(dm), 0)
+    if r == DISP_CHANGE_SUCCESSFUL:
+        return r, "仅动态生效（旧 API），重启/注销后会恢复默认方向"
+    return r, None
+
+
+def verify_rotation(before, device_name, new_orientation):
+    """应用后校验：确认变化确实发生在所选屏幕上。
+
+    返回 (状态, 宽, 高, 被转错的屏幕描述)，状态取值：
+      "ok"    目标屏幕已是新方向（宽/高为切换后的实际分辨率）
+      "wrong" 目标屏幕没变但别的屏幕变了（描述为实际被旋转的屏幕）
+      "none"  没有任何屏幕发生变化
+    """
+    after = snapshot()
+    cur = after.get(device_name)
+    if cur and cur[1] == new_orientation:
+        return "ok", cur[2], cur[3], ""
+    for name, s in after.items():
+        if before.get(name) != s:
+            return "wrong", 0, 0, s[0]
+    return "none", 0, 0, ""
 
 
 def list_displays():
@@ -168,6 +391,19 @@ def get_current_settings(device_name):
     dm = DEVMODEW()
     dm.dmSize = ctypes.sizeof(DEVMODEW)
     if not user32.EnumDisplaySettingsW(device_name, ENUM_CURRENT_SETTINGS, ctypes.byref(dm)):
+        return None
+    return dm
+
+
+def get_registry_settings(device_name):
+    """读取注册表中保存的显示设置（重启后生效的配置）。
+
+    用来识别"运行时方向已对、但注册表还是旧方向"的状态——这正是
+    "切换当时生效、重启后失效"的成因。
+    """
+    dm = DEVMODEW()
+    dm.dmSize = ctypes.sizeof(DEVMODEW)
+    if not user32.EnumDisplaySettingsW(device_name, ENUM_REGISTRY_SETTINGS, ctypes.byref(dm)):
         return None
     return dm
 
@@ -220,17 +456,18 @@ def rotate(device_name, mode=None):
         dmdo = ANGLE_TO_DMDO.get(mode)
         if dmdo is None:
             return False, "无效的角度 %d（仅支持 0/90/180/270）" % mode
-        if dmdo == current:
-            return True, "已经是 %s，无需切换" % ORIENTATION_NAME[current]
         new_orientation = dmdo
     elif mode == "portrait":
-        if current in (DMDO_90, DMDO_270):
-            return True, "已经是竖屏，无需切换"
-        new_orientation = DMDO_90
+        new_orientation = current if current in (DMDO_90, DMDO_270) else DMDO_90
     else:
-        if current in (DMDO_DEFAULT, DMDO_180):
-            return True, "已经是横屏，无需切换"
-        new_orientation = DMDO_DEFAULT
+        new_orientation = current if current in (DMDO_DEFAULT, DMDO_180) else DMDO_DEFAULT
+
+    if new_orientation == current:
+        # 运行时方向虽已符合，但注册表（重启后生效的配置）可能还是旧方向，
+        # 此时仍需真正执行一次以完成持久化，不能以"无需切换"跳过
+        reg = get_registry_settings(device_name)
+        if reg is None or reg.dmDisplayOrientation == current:
+            return True, "已经是 %s，无需切换" % ORIENTATION_NAME.get(current, str(current))
 
     width, height = dm.dmPelsWidth, dm.dmPelsHeight
     will_be_portrait = new_orientation in (DMDO_90, DMDO_270)
@@ -266,25 +503,51 @@ def rotate(device_name, mode=None):
     candidates.extend(other_freq)
 
     before = snapshot()
+    orient_name = ORIENTATION_NAME.get(new_orientation, str(new_orientation))
 
+    # 第一优先：CCD API（系统"设置"应用同款机制），应用并写入 CCD 数据库，重启后仍生效
+    if rotate_via_ccd(device_name, new_orientation):
+        status, w, h, wrong_desc = verify_rotation(before, device_name, new_orientation)
+        if status == "ok":
+            return True, "已切换为 %s，分辨率 %dx%d（已持久化，重启后仍生效）" % (
+                orient_name, w, h)
+        if status == "wrong":
+            return True, "警告：所选屏幕未变化，实际被旋转的是「%s」。" % wrong_desc
+
+    # 第二优先：ChangeDisplaySettings 写注册表（CCD 不可用或调用失败的机器）
+    # 必须把所有候选的持久化路径试完，才能退到仅动态生效——否则动态模式一旦
+    # 先成功，就会掩盖后面本来可以持久化的候选（旧版"重启失效"的另一成因）
     last_result = DISP_CHANGE_FAILED
-    last_note = ""
+    restart_note = ""
     for cand in candidates:
-        last_result, last_note = apply_mode(device_name, cand)
-        if last_result != DISP_CHANGE_SUCCESSFUL:
+        last_result, note = try_persist(device_name, cand)
+        if note is None:
             continue
-        # 应用后验证：确认变化确实发生在所选屏幕上
-        after = snapshot()
-        cur = after.get(device_name)
-        if cur and cur[1] == new_orientation:
+        status, w, h, wrong_desc = verify_rotation(before, device_name, new_orientation)
+        if status == "ok":
             return True, "已切换为 %s，分辨率 %dx%d（%s）" % (
-                ORIENTATION_NAME.get(new_orientation, str(new_orientation)),
-                cur[2], cur[3], last_note)
-        # 目标屏幕没变，找出实际被旋转的屏幕并明确告知
-        for name, s in after.items():
-            if before.get(name) != s:
-                return True, "警告：所选屏幕未变化，实际被旋转的是「%s」（%s）。" \
-                    "本机 Ex API 指定显示器失败，已回退到旧 API" % (s[0], last_note)
+                orient_name, w, h, note)
+        if status == "wrong":
+            return True, "警告：所选屏幕未变化，实际被旋转的是「%s」（%s）。" % (
+                wrong_desc, note)
+        if "重启后生效" in note:
+            restart_note = note
+
+    # 最后手段：仅动态生效（重启/注销后恢复默认，如实告知用户）
+    for cand in candidates:
+        last_result, note = try_dynamic(device_name, cand)
+        if note is None:
+            continue
+        status, w, h, wrong_desc = verify_rotation(before, device_name, new_orientation)
+        if status == "ok":
+            return True, "已切换为 %s，分辨率 %dx%d（%s）" % (
+                orient_name, w, h, note)
+        if status == "wrong":
+            return True, "警告：所选屏幕未变化，实际被旋转的是「%s」（%s）。" % (
+                wrong_desc, note)
+
+    if restart_note:
+        return True, "已切换为 %s（%s）。当前会话需重启后生效" % (orient_name, restart_note)
 
     msg = DISP_CHANGE_MSG.get(last_result, "未知错误码 %d" % last_result)
     return False, "切换失败（%s）。若提示模式不受支持，可在显卡控制面板中确认允许旋转显示" % msg
