@@ -77,7 +77,7 @@ def main():
     msg = sys.argv[1] if len(sys.argv) > 1 else ""
     if not msg:
         ver = get_version() or "unknown"
-        msg = "release v%s: 桌面小鱼宠物 - 自由游动 / 鼠标交互 / 多鱼共存" % ver
+        msg = "release v%s: 屏幕横竖屏一键切换工具 - 快速切换 / 多显示器 / 交互式菜单" % ver
 
     print("=== 1/4 暂存并提交本地改动 ===")
     if run(["git", "add", "-A"]) != 0:
