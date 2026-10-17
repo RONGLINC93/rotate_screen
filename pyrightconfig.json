@@ -1,0 +1,10 @@
+{
+  "typeCheckingMode": "standard",
+  "reportMissingParameterType": false,
+  "reportUnknownParameterType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownVariableType": false,
+  "reportAny": false,
+  "reportUnannotatedClassAttribute": false
+}
